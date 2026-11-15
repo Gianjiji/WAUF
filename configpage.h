@@ -10,7 +10,7 @@ static const char CONFIGPAGE[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WAUF - CONFIGURAZIONE</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <style>
 :root{--amb:#f5b301;--dim:#7a5c07;--bg:#0b0c0e;--cell:#17181c;--grn:#3ddc84;--red:#e05252}
 *{box-sizing:border-box;margin:0}
@@ -91,10 +91,20 @@ Esempi: MXP/LIMC Milano Malpensa, LIN/LIML Milano Linate, FCO/LIRF Roma Fiumicin
 USA GPS funziona solo su https o su localhost per limiti del browser: su http://ip locale usa la mappa.</p>
 </section>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
 const $=id=>document.getElementById(id);
 let map=null,marker=null,circle=null,st=null;
+// Il nome della rete lo sceglie chi la configura (e chi configura una rete vicina):
+// entra nella pagina solo come testo, mai come markup.
+function esc(s){return (s+'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+// POST di una modifica. Fuori dalla prima configurazione il dispositivo chiede
+// le credenziali (le stesse dell'aggiornamento firmware): se mancano risponde 401.
+async function post(url,params){
+ const r=await fetch(url,{method:'POST',body:params});
+ if(r.status==401)return {ok:false,err:'ACCESSO NEGATO: servono utente e password di amministrazione'};
+ try{return await r.json()}catch(e){return {ok:false,err:'RISPOSTA NON VALIDA'}}
+}
 function msg(id,t,ok){const e=$(id);e.textContent=t;e.className='msg '+(ok?'ok':'err')}
 function setPos(la,lo){$('iLat').value=(+la).toFixed(5);$('iLon').value=(+lo).toFixed(5);
  if(marker){marker.setLatLng([la,lo]);circle.setLatLng([la,lo])}}
@@ -116,12 +126,12 @@ function initMap(la,lo){
 async function load(){
  try{st=await(await fetch('/api/status')).json()}catch(e){$('st').textContent='ERRORE';return}
  $('st').innerHTML='MODO <b>'+(st.mode=='ap'?'ACCESS POINT (prima configurazione)':'CONNESSO')+'</b> &middot; RETE <b>'+
-  (st.ssid||'-')+'</b> &middot; IP <b>'+st.ip+'</b>'+(st.mode=='sta'?' &middot; WIFI <b>'+st.rssi+' dBm</b>':'')+
-  ' &middot; MDNS <b>http://'+st.mdns+'.local</b>';
+  esc(st.ssid||'-')+'</b> &middot; IP <b>'+esc(st.ip)+'</b>'+(st.mode=='sta'?' &middot; WIFI <b>'+esc(st.rssi)+' dBm</b>':'')+
+  ' &middot; MDNS <b>http://'+esc(st.mdns)+'.local</b>';
  $('iSsid').value=st.ssid||'';
  const kb=n=>Math.round(n/1024)+' KB';
  const mb=n=>(n/1048576).toFixed(n%1048576?1:0)+' MB';
- $('ota').innerHTML='FIRMWARE <b>v'+(st.fw||'?')+'</b> &middot; SKETCH <b>'+kb(st.sketch||0)+'</b> &middot; SPAZIO LIBERO PER OTA <b>'+kb(st.free||0)+'</b>'+
+ $('ota').innerHTML='FIRMWARE <b>v'+esc(st.fw||'?')+'</b> &middot; SKETCH <b>'+kb(st.sketch||0)+'</b> &middot; SPAZIO LIBERO PER OTA <b>'+kb(st.free||0)+'</b>'+
   ' &middot; FLASH <b>'+mb(st.flash||0)+'</b>'+(st.flashCfg&&st.flash&&st.flashCfg!=st.flash?' (IDE: '+mb(st.flashCfg)+')':'')+
   (st.free&&st.sketch&&st.free<st.sketch?'<br><span class="err">SPAZIO INSUFFICIENTE: nell\'IDE scegli Flash Size "4MB (FS:none OTA:~1019KB)" o "FS:1MB" e ricarica via USB</span>':'');
  $('iIata').value=st.iata;$('iIcao').value=st.icao;$('iName').value=st.name;
@@ -144,21 +154,21 @@ $('bEye').onclick=()=>{const p=$('iPass');p.type=p.type=='password'?'text':'pass
 $('bWifi').onclick=async()=>{
  const ssid=$('iSsid').value.trim();if(!ssid){msg('wifiMsg','INSERISCI LA RETE',false);return}
  $('bWifi').disabled=true;msg('wifiMsg','SALVATAGGIO...',true);
- try{const r=await(await fetch('/api/wifi',{method:'POST',body:new URLSearchParams({ssid,pass:$('iPass').value})})).json();
+ try{const r=await post('/api/wifi',new URLSearchParams({ssid,pass:$('iPass').value}));
   msg('wifiMsg',r.ok?'SALVATO. RIAVVIO IN CORSO: RICOLLEGATI ALLA TUA RETE':'ERRORE: '+r.err,r.ok);
  }catch(e){msg('wifiMsg','ERRORE DI RETE',false)}
  $('bWifi').disabled=false;
 };
 $('bDest').onclick=async()=>{
  const p=new URLSearchParams({iata:$('iIata').value.trim(),icao:$('iIcao').value.trim(),name:$('iName').value.trim()});
- try{const r=await(await fetch('/api/dest',{method:'POST',body:p})).json();
+ try{const r=await post('/api/dest',p);
   msg('destMsg',r.ok?'SALVATO':'ERRORE: '+r.err,r.ok);
  }catch(e){msg('destMsg','ERRORE DI RETE',false)}
 };
 $('bPos').onclick=async()=>{
  const p=new URLSearchParams({lat:$('iLat').value.replace(',','.'),lon:$('iLon').value.replace(',','.'),radius:$('iRad').value});
- try{const r=await(await fetch('/api/config',{method:'POST',body:p})).json();
-  msg('posMsg',r.ok?'SALVATO':'VALORI NON VALIDI',r.ok);
+ try{const r=await post('/api/config',p);
+  msg('posMsg',r.ok?'SALVATO':(r.err&&r.err.indexOf('ACCESSO')==0?r.err:'VALORI NON VALIDI'),r.ok);
  }catch(e){msg('posMsg','ERRORE DI RETE',false)}
 };
 $('bGeo').onclick=()=>{

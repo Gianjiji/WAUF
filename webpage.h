@@ -66,7 +66,7 @@ a.btn{margin-left:auto}
 @media(max-width:640px){.lg{display:none}body{padding:12px 6px}.board{padding:6px}th,td{padding:2px 4px}}
 @media(max-width:480px){.board{overflow-x:auto}}             /* telefoni stretti: scorre solo il tabellone */
 </style>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 </head><body>
 <header><h1 id="ttl">WAUF</h1><div id="clock">--:--:--</div></header>
 <div id="meta"></div>
@@ -80,7 +80,7 @@ a.btn{margin-left:auto}
 <a class="btn" href="/config">&#9881; CONFIGURAZIONE</a>
 </div>
 <div id="map" hidden></div>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
 let onlyTrn=true,last={},data=null,showMap=false,map=null,home=null,ring=null,markers={};
 const $=id=>document.getElementById(id);
@@ -112,9 +112,9 @@ function renderMap(){
   alive[f.cs]=1;
   const rot=f.trk>=0?f.trk:0;
   const icon=L.divIcon({className:'',iconSize:[28,28],iconAnchor:[14,14],
-   html:'<div class="pl'+(f.vis?' vis trn':f.trn?' trn':'')+'" style="transform:rotate('+rot+'deg)">'+PLANE+'</div><b>'+esc(f.cs)+'</b>'});
+   html:'<div class="pl'+(f.vis?' vis trn':f.trn?' trn':'')+'" style="transform:rotate('+(+rot||0)+'deg)">'+PLANE+'</div><b>'+esc(f.cs)+'</b>'});
   const pop='<b>'+esc(f.cs)+'</b> '+esc(f.route)+'<br>'+(f.typ?esc(f.typ)+' ':'')+(f.reg?esc(f.reg):'')+
-   '<br>'+(f.alt<0?'a terra':f.alt+' ft')+' &middot; '+f.gs+' kt &middot; '+f.dist+' km '+f.dir;
+   '<br>'+(f.alt<0?'a terra':esc(f.alt)+' ft')+' &middot; '+esc(f.gs)+' kt &middot; '+esc(f.dist)+' km '+esc(f.dir);
   if(markers[f.cs]){markers[f.cs].setLatLng([+f.lat,+f.lon]).setIcon(icon).setPopupContent(pop)}
   else markers[f.cs]=L.marker([+f.lat,+f.lon],{icon}).addTo(map).bindPopup(pop);
  }
@@ -124,11 +124,14 @@ const LOGO='https://www.flightaware.com/images/airline_logos/90p/';
 $('bTrn').onclick=()=>{onlyTrn=true;sw();render();renderMap()};
 $('bAll').onclick=()=>{onlyTrn=false;sw();render();renderMap()};
 function sw(){$('bTrn').classList.toggle('on',onlyTrn);$('bAll').classList.toggle('on',!onlyTrn)}
+// Tutto cio' che arriva dall'API (callsign, rotte, sigle) e' testo di terzi: entra
+// nella pagina solo passando da esc(), mai come markup.
+function esc(s){return (s+'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function tiles(s,w){s=(s+'').toUpperCase().padEnd(w).slice(0,w);
- return '<span class="t">'+[...s].map(c=>'<span>'+(c==' '?'&nbsp;':c)+'</span>').join('')+'</span>'}
-function esc(s){return (s+'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-// Codice compagnia: dal routeset, altrimenti le 3 lettere iniziali del callsign (prefisso ICAO)
-function airline(f){if(f.al)return f.al;const m=/^([A-Z]{3})[0-9]/.exec(f.cs||'');return m?m[1]:''}
+ return '<span class="t">'+[...s].map(c=>'<span>'+(c==' '?'&nbsp;':esc(c))+'</span>').join('')+'</span>'}
+// Codice compagnia: dal routeset, altrimenti le 3 lettere iniziali del callsign (prefisso ICAO).
+// Finisce in un URL e in un attributo: si accetta solo la forma di un codice vero.
+function airline(f){const a=f.al||(/^([A-Z]{3})[0-9]/.exec(f.cs||'')||[])[1]||'';return /^[A-Z0-9]{2,3}$/.test(a)?a:''}
 function logo(f){const a=airline(f);if(!a)return '';
  return '<img src="'+LOGO+a+'.png" alt="'+a+'" title="'+a+'" onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),{textContent:\''+a+'\'}))">'}
 function render(){
@@ -151,9 +154,9 @@ function render(){
  $('ttl').textContent='WAUF ✈ ARRIVI '+(data.destName||data.dest);
  document.title='WAUF - '+(data.destName||data.dest);
  $('bTrn').textContent='SOLO '+data.dest;
- $('meta').innerHTML='POS <b>'+data.lat+' '+data.lon+'</b> &middot; RAGGIO <b>'+data.radius+
-  ' NM</b> &middot; WIFI <b>'+data.rssi+' dBm</b> &middot; AGG. <b>'+
-  (data.age<0?'MAI':data.age+' S FA')+'</b> &middot; DEST <b>'+data.dest+'</b>';
+ $('meta').innerHTML='POS <b>'+esc(data.lat)+' '+esc(data.lon)+'</b> &middot; RAGGIO <b>'+esc(data.radius)+
+  ' NM</b> &middot; WIFI <b>'+esc(data.rssi)+' dBm</b> &middot; AGG. <b>'+
+  (data.age<0?'MAI':esc(data.age)+' S FA')+'</b> &middot; DEST <b>'+esc(data.dest)+'</b>';
 }
 async function doFetch(){
  try{data=await(await fetch('/api/flights')).json();render();renderMap()}catch(e){}
