@@ -13,6 +13,8 @@ File del progetto:
 | `webpage.h`     | tabellone `/` (HTML/CSS/JS in PROGMEM)               |
 | `configpage.h`  | pagina di configurazione `/config`                   |
 | `updatepage.h`  | pagina di upload OTA `/update`                       |
+| `wauf_logic.h`  | logica pura (distanze, rotte, soglie, tempi), senza dipendenze da Arduino |
+| `tests/`        | test su PC della logica e, nel browser, delle pagine |
 
 ## Cablaggio
 
@@ -164,14 +166,46 @@ coordinate.
 | GET    | `/api/flights`  | JSON voli + stato                          |
 | GET    | `/api/status`   | JSON modo WiFi, rete, IP, aeroporto, pos.  |
 | GET    | `/api/scan`     | JSON reti WiFi visibili (bloccante ~3 s)   |
-| POST   | `/api/wifi`     | `ssid`, `pass` -> salva e riavvia          |
-| POST   | `/api/dest`     | `iata`, `icao`, `name`                     |
-| POST   | `/api/config`   | `lat`, `lon`, `radius`                     |
+| POST   | `/api/wifi`     | `ssid`, `pass` -> salva e riavvia (login)  |
+| POST   | `/api/dest`     | `iata`, `icao`, `name` (login)             |
+| POST   | `/api/config`   | `lat`, `lon`, `radius` (login)             |
 | GET    | `/update`       | pagina di upload OTA (login admin/OTA_PASS)|
 | POST   | `/update`       | upload del `.bin` (campo `firmware`)       |
 
 In modalita' access point ogni URL sconosciuto reindirizza a `/config` (captive
 portal) e `/update` non e' registrato.
+
+Le tre POST che modificano la configurazione richiedono le stesse credenziali
+dell'aggiornamento firmware (`OTA_USER` / `OTA_PASS`): il browser le chiede alla
+prima modifica. Senza, chiunque sulla rete di casa poteva cambiare WiFi, posizione
+e aeroporto. Fa eccezione la prima configurazione in modalita' access point, dove
+quella pagina e' l'unico modo per dare una rete al dispositivo. **Cambia
+`OTA_PASS` prima di caricare lo sketch**: il valore di default e' pubblico.
+
+## Test
+
+La logica (distanze, direzioni, rotte, soglie di visibilita', tempi a cavallo del
+riavvolgimento di `millis()`, validazione) sta in `wauf_logic.h` e si prova su un
+PC, senza scheda:
+
+```bash
+make -C tests            # serve solo g++
+```
+
+Le pagine web si provano in un browser vero, con le API del dispositivo simulate
+(nomi di rete e callsign ostili devono restare testo, "mai aggiornato" deve
+leggersi MAI, un 401 deve essere spiegato):
+
+```bash
+pip install pytest playwright && playwright install chromium
+pytest tests/test_pages.py
+```
+
+Per controllare che lo sketch compili senza IDE:
+
+```bash
+arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 --warnings all .
+```
 
 ## Dati
 
@@ -189,6 +223,13 @@ portal) e `/update` non e' registrato.
 - Velocita', rotta, quota e rateo arrivano dall'API con i decimali: vanno letti come
   float e arrotondati (con `| 0` ArduinoJson restituirebbe il default, cioe' 0 KT).
 - Versione firmware in `FW_VERSION`: aggiornala a ogni release, e' mostrata in `/config`.
+- Dalla 1.2.0: gli aerei non piu' aggiornati da 90 s spariscono anche da OLED e LED
+  (prima solo dalla pagina web); in access point di emergenza il riavvio automatico
+  ogni 3 minuti aspetta che nessuno stia usando la pagina di configurazione; il
+  layout della EEPROM non cambia, quindi l'aggiornamento conserva la configurazione.
+- Leaflet e' caricato da unpkg con hash di integrita' (SRI): se la CDN servisse un
+  file diverso il browser lo rifiuterebbe. Senza rete il tabellone funziona lo
+  stesso, senza mappa.
 
 ## Costanti di configurazione nello sketch
 
@@ -196,7 +237,7 @@ portal) e `/update` non e' registrato.
 |-------------------|------------------|----------------------------------------------|
 | `MDNS_NAME`       | `wauf`           | nome mDNS (`http://wauf.local`)              |
 | `AP_SSID`         | `WAUF-Setup`     | rete aperta di prima configurazione          |
-| `OTA_USER/PASS`   | `admin` / `wauf` | login della pagina `/update` (cambia la pass)|
+| `OTA_USER/PASS`   | `admin` / `wauf` | login di `/update` e delle modifiche alla configurazione (cambia la pass)|
 | `DEF_LAT/LON`     | Torino centro    | posizione di default                         |
 | `DEF_RADIUS`      | 25 nm            | raggio di default (max 250)                  |
 | `DEF_DEST_*`      | TRN / LIMF       | aeroporto di default                         |

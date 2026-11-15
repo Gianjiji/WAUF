@@ -1,0 +1,8 @@
+# Prodotti dei test e della compilazione
+tests/test_logic
+build/
+*.bin
+*.elf
+__pycache__/
+.pytest_cache/
+.DS_Store

@@ -36,6 +36,8 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 
+#include "wauf_logic.h"   // logica pura (distanze, rotte, soglie, tempi): provata su PC, vedi tests/
+
 // ---- Scelta display (entrambi 128x64 I2C, stesso layout) ----
 //   OLED_SH1106  -> 1.3"  (controller SH1106, libreria "Adafruit SH110X")
 //   commentato   -> 0.96" (controller SSD1306, libreria "Adafruit SSD1306")
@@ -54,7 +56,7 @@ const char* MDNS_NAME   = "wauf";        // -> http://wauf.local
 const char* AP_SSID     = "WAUF-Setup"; // rete aperta di configurazione (primo avvio)
 const char* OTA_USER    = "admin";      // login per http://wauf.local/update
 const char* OTA_PASS    = "wauf";       // CAMBIALA: chi la conosce puo' riscrivere il firmware
-const char* FW_VERSION  = "1.1.0";
+const char* FW_VERSION  = "1.2.0";
 
 // Posizione di default: Torino, centro citta' (Piazza Castello).
 // Modificabile dalla pagina /config: viene salvata in EEPROM.
@@ -175,57 +177,38 @@ bool isVisible(const Flight& f);
 RouteEntry* cacheFind(const char* cs);
 
 uint32_t lastPoll = 0, lastPageFlip = 0, bootMillis = 0, lastOkFetch = 0, apStarted = 0;
+uint32_t lastApActivity = 0;   // ultimo uso della pagina di configurazione in modalita' access point
 uint8_t  oledPage = 0;
 uint16_t pollCount = 0, errCount = 0;
 bool     restartPending = false;
 uint32_t restartAt = 0;
 
 // ---------------- Utility ----------------
-float deg2rad(float d) { return d * 0.017453292519943f; }
-
-float haversineKm(float lat1, float lon1, float lat2, float lon2) {
-  float dLat = deg2rad(lat2 - lat1), dLon = deg2rad(lon2 - lon1);
-  float a = sinf(dLat / 2) * sinf(dLat / 2) +
-            cosf(deg2rad(lat1)) * cosf(deg2rad(lat2)) * sinf(dLon / 2) * sinf(dLon / 2);
-  return 6371.0f * 2 * atan2f(sqrtf(a), sqrtf(1 - a));
-}
-
-int bearingDeg(float lat1, float lon1, float lat2, float lon2) {
-  float dLon = deg2rad(lon2 - lon1);
-  float y = sinf(dLon) * cosf(deg2rad(lat2));
-  float x = cosf(deg2rad(lat1)) * sinf(deg2rad(lat2)) -
-            sinf(deg2rad(lat1)) * cosf(deg2rad(lat2)) * cosf(dLon);
-  int b = (int)(atan2f(y, x) * 57.29578f);
-  return (b + 360) % 360;
-}
-
-const char* compass8(int deg) {
-  static const char* pts[] = {"N","NE","E","SE","S","SO","O","NO"};
-  return pts[((deg + 22) % 360) / 45];
-}
-
-void trimRight(char* s) {
-  int n = strlen(s);
-  while (n > 0 && (s[n-1] == ' ' || s[n-1] == '\r' || s[n-1] == '\n')) s[--n] = 0;
-}
+// I calcoli veri stanno in wauf_logic.h; qui restano solo i nomi usati dallo sketch.
+using wauf::haversineKm;
+using wauf::bearingDeg;
+using wauf::compass8;
+using wauf::trimRight;
 
 // Il volo e' diretto all'aeroporto monitorato? (destinazione = un segmento dopo il primo)
 bool routeToDest(const char* route) {
-  if (!route[0] || route[0] == '?') return false;
-  char buf[20]; strncpy(buf, route, 19); buf[19] = 0;
-  char* tok = strtok(buf, "-");
-  bool first = true;
-  while (tok) {
-    if (!first && (strcmp(tok, destIata) == 0 || strcmp(tok, destIcao) == 0)) return true;
-    first = false;
-    tok = strtok(NULL, "-");
-  }
-  return false;
+  return wauf::routeReaches(route, destIata, destIcao);
 }
 
 // "Visibile a occhio nudo": inbound Caselle, in discesa, sotto quota soglia
 bool isVisible(const Flight& f) {
-  return f.toDest && f.altFt > 0 && f.altFt < VISIBLE_ALT_FT && f.vRate <= VISIBLE_VR;
+  return wauf::visibleToEye(f.toDest, f.altFt, f.vRate, VISIBLE_ALT_FT, VISIBLE_VR);
+}
+
+// Toglie di mezzo i velivoli non piu' aggiornati. Se l'API smette di rispondere
+// i poll falliscono e l'elenco resta quello dell'ultimo riuscito: senza questa
+// pulizia OLED e LED continuerebbero a mostrare, anche per ore, aerei passati
+// da tempo (la pagina web li filtrava gia' per conto suo).
+void expireStaleFlights() {
+  uint32_t now = millis();
+  for (int i = 0; i < MAX_FLIGHTS; i++)
+    if (flights[i].active && wauf::isStale(now, flights[i].seenAt, STALE_MS))
+      flights[i].active = false;
 }
 
 RouteEntry* cacheFind(const char* cs) {
@@ -399,11 +382,27 @@ void fetchRoutes() {
 #include "configpage.h"   // HTML/CSS/JS della pagina di configurazione (PROGMEM)
 #include "updatepage.h"   // pagina di upload OTA (PROGMEM)
 
+// Chi modifica la configurazione deve farsi riconoscere, con le stesse
+// credenziali dell'aggiornamento firmware. Senza, chiunque sulla rete di casa
+// (o una pagina web aperta su un PC della rete) poteva cambiare WiFi, posizione
+// e aeroporto con una semplice POST. Fa eccezione la prima configurazione in
+// modalita' access point: li' il dispositivo non ha ancora una rete e quella
+// pagina e' l'unico modo per dargliela.
+bool requireAdmin() {
+  if (apMode) return true;
+  if (server.authenticate(OTA_USER, OTA_PASS)) return true;
+  server.requestAuthentication();
+  return false;
+}
+
+// In access point: qualcuno sta usando la pagina di configurazione.
+void noteApActivity() { if (apMode) lastApActivity = millis(); }
+
 void handleRoot() {
   if (apMode) { server.sendHeader("Location", "/config"); server.send(302, "text/plain", ""); return; }
   server.send_P(200, "text/html", WEBPAGE);
 }
-void handleConfigPage() { server.send_P(200, "text/html", CONFIGPAGE); }
+void handleConfigPage() { noteApActivity(); server.send_P(200, "text/html", CONFIGPAGE); }
 
 void handleApi() {
   JsonDocument doc;
@@ -416,12 +415,12 @@ void handleApi() {
   doc["heap"]    = ESP.getFreeHeap();
   doc["uptime"]  = (millis() - bootMillis) / 1000;
   doc["polls"]   = pollCount;
-  doc["age"]     = lastOkFetch ? (millis() - lastOkFetch) / 1000 : -1;
+  doc["age"]     = wauf::ageSeconds(millis(), lastOkFetch);   // -1 = mai aggiornato
 
   JsonArray arr = doc["flights"].to<JsonArray>();
   for (int i = 0; i < MAX_FLIGHTS; i++) {
     if (!flights[i].active) continue;
-    if (millis() - flights[i].seenAt > STALE_MS) continue;
+    if (wauf::isStale(millis(), flights[i].seenAt, STALE_MS)) continue;
     JsonObject o = arr.add<JsonObject>();
     o["cs"]    = flights[i].callsign;
     o["hex"]   = flights[i].hex;
@@ -447,6 +446,7 @@ void handleApi() {
 
 // GET /api/status -> stato per la pagina di configurazione
 void handleStatus() {
+  noteApActivity();
   JsonDocument doc;
   doc["mode"]   = apMode ? "ap" : "sta";
   doc["ssid"]   = wifiSsid;
@@ -470,6 +470,7 @@ void handleStatus() {
 
 // GET /api/scan -> reti WiFi visibili (bloccante ~2-3 s)
 void handleScan() {
+  noteApActivity();
   int n = WiFi.scanNetworks(false, false);
   JsonDocument doc;
   JsonArray arr = doc.to<JsonArray>();
@@ -491,6 +492,8 @@ void handleScan() {
 
 // POST /api/wifi (ssid, pass) -> salva e riavvia
 void handleWifi() {
+  if (!requireAdmin()) return;
+  noteApActivity();
   String s = server.arg("ssid"), p = server.arg("pass");
   if (!s.length() || s.length() > 32 || p.length() > 64) {
     server.send(400, "application/json", F("{\"ok\":false,\"err\":\"ssid non valido\"}"));
@@ -504,14 +507,13 @@ void handleWifi() {
 }
 
 static bool isAlnumUpper(const String& s, unsigned minLen, unsigned maxLen) {
-  if (s.length() < minLen || s.length() > maxLen) return false;
-  for (unsigned i = 0; i < s.length(); i++)
-    if (!isalnum(s[i])) return false;
-  return true;
+  return wauf::isAlnumCode(s.c_str(), minLen, maxLen);
 }
 
 // POST /api/config  (lat, lon, radius) -> salva in EEPROM e ri-polla subito
 void handleConfig() {
+  if (!requireAdmin()) return;
+  noteApActivity();
   if (!server.hasArg("lat") || !server.hasArg("lon")) {
     server.send(400, "application/json", F("{\"ok\":false,\"err\":\"lat/lon mancanti\"}"));
     return;
@@ -519,8 +521,7 @@ void handleConfig() {
   float la = server.arg("lat").toFloat();
   float lo = server.arg("lon").toFloat();
   int   r  = server.hasArg("radius") ? server.arg("radius").toInt() : radiusNm;
-  if (la < -90 || la > 90 || lo < -180 || lo > 180 || r < 1 || r > 250 ||
-      (la == 0 && lo == 0)) {
+  if (!wauf::validHome(la, lo, r)) {   // rifiuta anche NaN, che i confronti diretti lasciavano passare
     server.send(400, "application/json", F("{\"ok\":false,\"err\":\"valori non validi\"}"));
     return;
   }
@@ -534,6 +535,8 @@ void handleConfig() {
 
 // POST /api/dest (iata, icao, name) -> aeroporto da monitorare
 void handleDest() {
+  if (!requireAdmin()) return;
+  noteApActivity();
   String ia = server.arg("iata"), ic = server.arg("icao"), nm = server.arg("name");
   ia.toUpperCase(); ic.toUpperCase(); nm.toUpperCase(); nm.trim();
   if (!isAlnumUpper(ia, 3, 3) || !isAlnumUpper(ic, 4, 4) || nm.length() > 24) {
@@ -732,8 +735,13 @@ void loop() {
 
   if (restartPending && (int32_t)(millis() - restartAt) >= 0) ESP.restart();
 
-  // In AP di emergenza con credenziali salvate: riprova la rete di casa dopo un po'
-  if (apMode && wifiSsid[0] && millis() - apStarted > AP_RETRY_MS) ESP.restart();
+  // In AP di emergenza con credenziali salvate: riprova la rete di casa dopo un po'.
+  // Ma non mentre qualcuno sta usando la pagina di configurazione: il riavvio
+  // ogni 3 minuti interrompeva chi stava correggendo la password del WiFi.
+  if (apMode && wifiSsid[0] &&
+      wauf::elapsedMs(millis(), apStarted) > AP_RETRY_MS &&
+      (!lastApActivity || wauf::elapsedMs(millis(), lastApActivity) > AP_RETRY_MS))
+    ESP.restart();
 
   if (!apMode && millis() - lastPoll >= POLL_MS) {
     lastPoll = millis();
@@ -744,6 +752,7 @@ void loop() {
 
   if (!apMode && millis() - lastPageFlip >= OLED_PAGE_MS) {
     lastPageFlip = millis();
+    expireStaleFlights();
     oledPage ^= 1;
     if (oledPage) oledFlightPage(); else oledInfoPage();
 
